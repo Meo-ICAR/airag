@@ -5,8 +5,10 @@ namespace App\Console\Commands;
 use Illuminate\Console\Command;
 use Spatie\PdfToText\Pdf;
 use Illuminate\Support\Facades\Http;
-use App\Neuron\MyChatBot;
+use App\NeuronAI\MyChatBot;
 use NeuronAI\Chat\Messages\UserMessage;
+use NeuronAI\RAG\DataLoader\FileDataLoader;
+
 
 class RAGDemo extends Command
 {
@@ -29,6 +31,35 @@ class RAGDemo extends Command
      */
     public function handle()
     {
+        $this->info('🧠 NeuronAI Laravel DB Demo');
+        $this->info('========================');
+
+        if (!env('GOOGLE_API_KEY')) {
+            $this->error('❌ GOOGLE_API_KEY not set in .env file');
+            $this->info('Please add your Google API configuration to the .env file:');
+            $this->line('GOOGLE_API_KEY=your-google-api-key');
+            $this->line('GEMINI_MODEL=gemini-2.5-flash');
+            return 1;
+        }
+
+        $agent = new MyChatBot();
+        
+        // For console commands, use a deterministic thread ID based on current date
+        $threadId = 'demo-' . now()->format('Ymd-His');
+        $agent->setThreadId($threadId);
+        $this->info("Using thread ID: " . $threadId);
+        /*
+        $agent->addDocuments(
+            // Use the file data loader component to process a text file
+            FileDataLoader::for(__DIR__.'/my-article.md')->getDocuments()
+        );
+        */
+        $documents = FileDataLoader::for('public')
+    ->addReader('pdf', new \NeuronAI\RAG\DataLoader\PdfReader())
+    ->getDocuments();
+        $agent::make()->addDocuments($documents);    
+        return $this->interactiveMode($agent);
+        /*
         $pdfPath = $this->argument('pdf');
 
         // Validate the PDF file exists
@@ -71,12 +102,64 @@ class RAGDemo extends Command
             $this->line("- Generate embeddings for semantic search");
             $this->line("- Store in a vector database");
             $this->line("- Implement retrieval and generation");
-
+      
             return 0;
             
         } catch (\Exception $e) {
             $this->error("Error processing PDF: " . $e->getMessage());
             return 1;
         }
+        */
+       
+    }
+
+    protected function interactiveMode(MyChatBot $agent): int
+    {
+        $this->info("🤖 Interactive Chat with RAG Agent");
+        $this->info("Type \"quit\" to exit");
+
+        while (true) {
+            $message= $this->ask("\nYou:");
+
+            if (strtolower($message) === 'quit') {
+                break;
+            }
+
+            $this->info("\n🤖 Agent is thinking...");
+
+            $maxRetries = 3;
+            $retryCount = 0;
+            $success = false;
+
+            while ($retryCount < $maxRetries && !$success) {
+                try {
+                    $response = $agent->chat(new UserMessage($message));
+                    $this->line("Agent: " . $response->getContent());
+                    $this->newLine();
+                    $success = true;
+                } catch (\Exception $e) {
+                    $errorMessage = $e->getMessage();
+                    $isServiceUnavailable = str_contains($errorMessage, '503') ||
+                                         str_contains(strtolower($errorMessage), 'service unavailable');
+
+                    if ($isServiceUnavailable && $retryCount < $maxRetries - 1) {
+                        $retryCount++;
+                        $this->warn("⚠️  Service temporarily unavailable. Retrying ({$retryCount}/{$maxRetries})...");
+                        sleep(2 * $retryCount); // Exponential backoff
+                        continue;
+                    }
+
+                    $this->error("Error: " . ($isServiceUnavailable ?
+                        'The AI service is currently overloaded. Please try again later.' :
+                        $errorMessage));
+
+                    if (!$isServiceUnavailable) {
+                        return 1;
+                    }
+                    break;
+                }
+            }
+        }
+        return 0;
     }
 }
